@@ -1,144 +1,202 @@
 package com.bettertntrun.managers;
 
 import com.bettertntrun.BetterTntRun;
-import com.bettertntrun.models.MapData;
-import org.bukkit.Location;
+import org.bukkit.*;
 import org.bukkit.entity.ArmorStand;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.EntityType;
 import org.bukkit.entity.Player;
-import org.bukkit.metadata.FixedMetadataValue;
+import org.bukkit.inventory.ItemStack;
+import org.bukkit.inventory.meta.LeatherArmorMeta;
+import org.bukkit.inventory.meta.SkullMeta;
 import org.bukkit.scheduler.BukkitRunnable;
 
 import java.util.*;
 
+/**
+ * Manages TNTRun NPCs as ArmorStands with leather armor and TNT head.
+ * No Citizens dependency required.
+ */
 public class NPCManager {
 
+    private static final double LOOK_RADIUS = 5.0;
     private final BetterTntRun plugin;
-    private final Map<UUID, String> npcMapLinks = new HashMap<>(); // Entity UUID -> mapName
-    private final Map<UUID, Float> npcDirections = new HashMap<>(); // Entity UUID -> default yaw
-    private final Map<String, UUID> npcConfigIds = new HashMap<>(); // config id -> entity UUID
+    private final Map<String, UUID> configToArmorStandUUID = new HashMap<>();
 
     public NPCManager(BetterTntRun plugin) {
         this.plugin = plugin;
     }
 
-    public void spawnNPC(String mapName, Location location, float direction) {
-        ArmorStand npc = (ArmorStand) location.getWorld().spawnEntity(location, EntityType.ARMOR_STAND);
-        npc.setCustomName("§6§l[TNTRun] §e" + mapName);
-        npc.setCustomNameVisible(true);
-        npc.setGravity(false);
-        npc.setInvulnerable(true);
-        npc.setCanPickupItems(false);
-        npc.setArms(true);
-        npc.setBasePlate(false);
+    /**
+     * Spawn a TNTRun NPC ArmorStand at the given location.
+     */
+    public void spawnNPC(Location location, float direction, String skinName) {
+        Location spawnLoc = location.clone();
+        spawnLoc.setYaw(direction);
 
-        Location npcLoc = npc.getLocation();
-        npcLoc.setYaw(direction);
-        npc.teleport(npcLoc);
+        ArmorStand armorStand = (ArmorStand) spawnLoc.getWorld().spawnEntity(spawnLoc, EntityType.ARMOR_STAND);
+        configureArmorStand(armorStand, skinName);
 
-        npc.setMetadata("tntrun_npc", new FixedMetadataValue(plugin, mapName));
+        // Set facing direction
+        Location asLoc = armorStand.getLocation();
+        asLoc.setYaw(direction);
+        armorStand.teleport(asLoc);
 
-        npcMapLinks.put(npc.getUniqueId(), mapName);
-        npcDirections.put(npc.getUniqueId(), direction);
-
+        // Save to config
         String configId = UUID.randomUUID().toString().substring(0, 8);
-        npcConfigIds.put(configId, npc.getUniqueId());
-        plugin.getConfigManager().saveNPC(configId, mapName, location, direction);
+        configToArmorStandUUID.put(configId, armorStand.getUniqueId());
+        plugin.getConfigManager().saveNPC(configId, location, direction, skinName);
 
-        startLookTask(npc);
+        // Start look-at-player task
+        startLookTask(armorStand, direction);
+
+        // Add custom name above
+        armorStand.setCustomName("§6§l[TNTRun] §eCliquez pour jouer");
+        armorStand.setCustomNameVisible(true);
     }
 
-    private void startLookTask(ArmorStand npc) {
+    /**
+     * Configure the armor stand with leather armor and TNT head.
+     */
+    private void configureArmorStand(ArmorStand armorStand, String skinName) {
+        armorStand.setGravity(false);
+        armorStand.setInvulnerable(true);
+        armorStand.setCanPickupItems(false);
+        armorStand.setBasePlate(false);
+        armorStand.setArms(true);
+        armorStand.setVisible(true);
+
+        // Mark as TNTRun NPC via scoreboard tag
+        armorStand.addScoreboardTag("tntrun_npc");
+
+        // TNT block as helmet
+        ItemStack tntHead = new ItemStack(Material.TNT);
+        armorStand.getEquipment().setHelmet(tntHead);
+
+        // Dyed leather armor (red/orange theme)
+        Color armorColor = Color.fromRGB(255, 85, 0); // Orange-red
+
+        ItemStack chestplate = new ItemStack(Material.LEATHER_CHESTPLATE);
+        LeatherArmorMeta chestMeta = (LeatherArmorMeta) chestplate.getItemMeta();
+        chestMeta.setColor(armorColor);
+        chestplate.setItemMeta(chestMeta);
+        armorStand.getEquipment().setChestplate(chestplate);
+
+        ItemStack leggings = new ItemStack(Material.LEATHER_LEGGINGS);
+        LeatherArmorMeta legMeta = (LeatherArmorMeta) leggings.getItemMeta();
+        legMeta.setColor(armorColor);
+        leggings.setItemMeta(legMeta);
+        armorStand.getEquipment().setLeggings(leggings);
+
+        ItemStack boots = new ItemStack(Material.LEATHER_BOOTS);
+        LeatherArmorMeta bootMeta = (LeatherArmorMeta) boots.getItemMeta();
+        bootMeta.setColor(armorColor);
+        boots.setItemMeta(bootMeta);
+        armorStand.getEquipment().setBoots(boots);
+    }
+
+    /**
+     * Make the ArmorStand look at the nearest player, or face default direction.
+     */
+    private void startLookTask(ArmorStand armorStand, float defaultYaw) {
         new BukkitRunnable() {
             @Override
             public void run() {
-                if (npc.isDead() || !npc.isValid()) {
+                if (armorStand == null || armorStand.isDead() || !armorStand.isValid()) {
                     cancel();
                     return;
                 }
 
                 Player nearest = null;
-                double nearestDist = 5.0;
+                double nearestDistSquared = LOOK_RADIUS * LOOK_RADIUS;
 
-                for (Entity entity : npc.getNearbyEntities(5, 5, 5)) {
-                    if (entity instanceof Player player) {
-                        double dist = player.getLocation().distance(npc.getLocation());
-                        if (dist < nearestDist) {
-                            nearestDist = dist;
+                for (Entity nearby : armorStand.getNearbyEntities(LOOK_RADIUS, LOOK_RADIUS, LOOK_RADIUS)) {
+                    if (nearby instanceof Player player) {
+                        double distSquared = player.getLocation().distanceSquared(armorStand.getLocation());
+                        if (distSquared <= nearestDistSquared) {
+                            nearestDistSquared = distSquared;
                             nearest = player;
                         }
                     }
                 }
 
-                Location npcLoc = npc.getLocation();
+                Location asLoc = armorStand.getLocation();
                 if (nearest != null) {
                     Location playerLoc = nearest.getLocation();
-                    double dx = playerLoc.getX() - npcLoc.getX();
-                    double dz = playerLoc.getZ() - npcLoc.getZ();
+                    double dx = playerLoc.getX() - asLoc.getX();
+                    double dz = playerLoc.getZ() - asLoc.getZ();
                     float yaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
-                    npcLoc.setYaw(yaw);
+                    asLoc.setYaw(yaw);
                 } else {
-                    Float defaultYaw = npcDirections.get(npc.getUniqueId());
-                    if (defaultYaw != null) npcLoc.setYaw(defaultYaw);
+                    asLoc.setYaw(defaultYaw);
                 }
-                npc.teleport(npcLoc);
+                armorStand.teleport(asLoc);
             }
         }.runTaskTimer(plugin, 0L, 5L);
     }
 
-    public String getLinkedMap(UUID entityUUID) {
-        return npcMapLinks.get(entityUUID);
-    }
-
+    /**
+     * Check if an entity is a TNTRun NPC ArmorStand.
+     */
     public boolean isNPC(Entity entity) {
-        return entity.hasMetadata("tntrun_npc");
+        return entity instanceof ArmorStand && entity.getScoreboardTags().contains("tntrun_npc");
     }
 
+    /**
+     * Load all NPCs from config on startup.
+     */
     public void loadAllNPCs() {
         Map<String, Object[]> npcs = plugin.getConfigManager().loadNPCs();
+
         for (Map.Entry<String, Object[]> entry : npcs.entrySet()) {
             Location loc = (Location) entry.getValue()[0];
-            String mapName = (String) entry.getValue()[1];
-            float direction = (float) entry.getValue()[2];
+            float direction = (float) entry.getValue()[1];
+            String skinName = (String) entry.getValue()[2];
 
-            if (loc.getWorld() == null) continue;
+            if (loc == null || loc.getWorld() == null) continue;
 
-            // Remove existing NPCs at that location
-            for (Entity entity : loc.getWorld().getNearbyEntities(loc, 1, 1, 1)) {
-                if (entity instanceof ArmorStand && entity.hasMetadata("tntrun_npc")) {
-                    entity.remove();
+            // Check if an ArmorStand NPC already exists near this location
+            boolean found = false;
+            for (Entity entity : loc.getWorld().getNearbyEntities(loc, 2, 2, 2)) {
+                if (isNPC(entity)) {
+                    configToArmorStandUUID.put(entry.getKey(), entity.getUniqueId());
+                    startLookTask((ArmorStand) entity, direction);
+                    found = true;
+                    break;
                 }
             }
 
-            ArmorStand npc = (ArmorStand) loc.getWorld().spawnEntity(loc, EntityType.ARMOR_STAND);
-            npc.setCustomName("§6§l[TNTRun] §e" + mapName);
-            npc.setCustomNameVisible(true);
-            npc.setGravity(false);
-            npc.setInvulnerable(true);
-            npc.setCanPickupItems(false);
-            npc.setArms(true);
-            npc.setBasePlate(false);
+            if (!found) {
+                // Create new ArmorStand NPC
+                Location spawnLoc = loc.clone();
+                spawnLoc.setYaw(direction);
+                ArmorStand armorStand = (ArmorStand) loc.getWorld().spawnEntity(spawnLoc, EntityType.ARMOR_STAND);
+                configureArmorStand(armorStand, skinName);
 
-            Location npcLoc = npc.getLocation();
-            npcLoc.setYaw(direction);
-            npc.teleport(npcLoc);
+                Location asLoc = armorStand.getLocation();
+                asLoc.setYaw(direction);
+                armorStand.teleport(asLoc);
 
-            npc.setMetadata("tntrun_npc", new FixedMetadataValue(plugin, mapName));
-            npcMapLinks.put(npc.getUniqueId(), mapName);
-            npcDirections.put(npc.getUniqueId(), direction);
-            npcConfigIds.put(entry.getKey(), npc.getUniqueId());
+                armorStand.setCustomName("§6§l[TNTRun] §eCliquez pour jouer");
+                armorStand.setCustomNameVisible(true);
 
-            startLookTask(npc);
+                configToArmorStandUUID.put(entry.getKey(), armorStand.getUniqueId());
+                startLookTask(armorStand, direction);
+            }
         }
+        plugin.getLogger().info("Loaded " + configToArmorStandUUID.size() + " TNTRun NPC(s) (ArmorStand)");
     }
 
+    /**
+     * Remove all NPC ArmorStands on disable.
+     */
     public void removeAllNPCs() {
-        for (UUID uuid : npcMapLinks.keySet()) {
-            Entity entity = plugin.getServer().getEntity(uuid);
-            if (entity != null) entity.remove();
+        for (UUID uuid : configToArmorStandUUID.values()) {
+            Entity entity = Bukkit.getEntity(uuid);
+            if (entity != null && !entity.isDead()) {
+                entity.remove();
+            }
         }
-        npcMapLinks.clear();
-        npcDirections.clear();
+        configToArmorStandUUID.clear();
     }
 }

@@ -3,9 +3,9 @@ package com.bettertntrun.models;
 import java.util.UUID;
 
 public class PlayerData {
-    private UUID uuid;
-    private String name;
-    private int wins;
+    private final UUID uuid;
+    private final String name;
+    private final int wins;
 
     public PlayerData(UUID uuid, String name, int wins) {
         this.uuid = uuid;
@@ -16,5 +16,4 @@ public class PlayerData {
     public UUID getUuid() { return uuid; }
     public String getName() { return name; }
     public int getWins() { return wins; }
-    public void addWin() { this.wins++; }
 }
