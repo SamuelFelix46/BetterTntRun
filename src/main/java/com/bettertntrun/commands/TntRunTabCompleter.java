@@ -1,6 +1,7 @@
 package com.bettertntrun.commands;
 
 import com.bettertntrun.BetterTntRun;
+import org.bukkit.Bukkit;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
 import org.bukkit.command.TabCompleter;
@@ -26,20 +27,25 @@ public class TntRunTabCompleter implements TabCompleter {
         if (args.length == 1) {
             List<String> subs = new ArrayList<>(Arrays.asList("join", "leave", "top", "hub"));
             if (sender.hasPermission("bettertntrun.admin")) {
-                subs.addAll(Arrays.asList("config", "setspawn", "setpos1", "setpos2", "setplayer", "deftime", "start", "NCPspawn"));
+                subs.addAll(Arrays.asList("config", "setspawn", "setpos1", "setpos2", "scan", "setplayer", "deftime", "start", "NCPspawn"));
             }
             return filter(subs, args[0]);
         }
 
         if (args.length == 2) {
             switch (args[0].toLowerCase()) {
-                case "join", "config", "setspawn", "setpos1", "setpos2", "deftime", "start", "ncpspawn":
+                case "join", "config", "setspawn", "setpos1", "setpos2", "scan", "deftime":
                     return filter(new ArrayList<>(plugin.getConfigManager().getMaps().keySet()), args[1]);
                 case "hub":
                     if (sender.hasPermission("bettertntrun.admin")) return filter(List.of("setposition"), args[1]);
                     break;
                 case "setplayer":
                     return List.of("<min>");
+                case "ncpspawn":
+                    return filter(Arrays.asList("north", "south", "east", "west", "ne", "nw", "se", "sw"), args[1]);
+                case "start":
+                    // Suggest active instance IDs
+                    return filter(new ArrayList<>(plugin.getGameManager().getActiveGames().keySet()), args[1]);
             }
         }
 
@@ -52,7 +58,10 @@ public class TntRunTabCompleter implements TabCompleter {
                         return filter(new ArrayList<>(plugin.getConfigManager().getMaps().keySet()), args[2]);
                     break;
                 case "ncpspawn":
-                    return filter(Arrays.asList("north", "south", "east", "west", "ne", "nw", "se", "sw"), args[2]);
+                    return filter(
+                        Bukkit.getOnlinePlayers().stream().map(Player::getName).collect(Collectors.toList()),
+                        args[2]
+                    );
             }
         }
 

@@ -2,52 +2,69 @@ package com.bettertntrun.game;
 
 import com.bettertntrun.BetterTntRun;
 import com.bettertntrun.models.MapData;
+import com.bettertntrun.models.MapInstance;
 import org.bukkit.Bukkit;
 import org.bukkit.GameMode;
 import org.bukkit.Location;
+import org.bukkit.Material;
+import org.bukkit.block.Block;
 import org.bukkit.boss.BarColor;
 import org.bukkit.boss.BarStyle;
 import org.bukkit.boss.BossBar;
 import org.bukkit.entity.Player;
 import org.bukkit.scheduler.BukkitRunnable;
-import org.bukkit.scoreboard.*;
+import org.bukkit.scoreboard.Criteria;
+import org.bukkit.scoreboard.DisplaySlot;
+import org.bukkit.scoreboard.Objective;
+import org.bukkit.scoreboard.Scoreboard;
 
-import java.util.*;
-import java.util.concurrent.ThreadLocalRandom;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+import java.util.UUID;
 
 public class Game {
 
     public enum GameState { WAITING, STARTING, RUNNING, ENDING }
 
     private final BetterTntRun plugin;
-    private final MapData mapData;
+    private final MapInstance mapInstance;
     private final Set<UUID> players = new HashSet<>();
     private final Set<UUID> alivePlayers = new HashSet<>();
     private final Set<UUID> spectators = new HashSet<>();
+    private final java.util.Map<UUID, Scoreboard> playerScoreboards = new java.util.HashMap<>();
+    private final Set<Location> scheduledBlocks = new HashSet<>();
     private GameState state = GameState.WAITING;
     private BossBar bossBar;
     private BukkitRunnable countdownTask;
-    private final Map<UUID, Scoreboard> playerScoreboards = new HashMap<>();
+    private BukkitRunnable tntMonitorTask;
+    private boolean gracePeriod = false;
+    private long waitingStartTimeMillis;
 
-    public Game(BetterTntRun plugin, MapData mapData) {
+    public Game(BetterTntRun plugin, MapInstance mapInstance) {
         this.plugin = plugin;
-        this.mapData = mapData;
-        this.bossBar = Bukkit.createBossBar("§eTNTRun - " + mapData.getName(), BarColor.YELLOW, BarStyle.SOLID);
+        this.mapInstance = mapInstance;
+        this.bossBar = Bukkit.createBossBar("\u00a7eTNTRun - " + mapInstance.getTemplateName(), BarColor.YELLOW, BarStyle.SOLID);
+        this.waitingStartTimeMillis = System.currentTimeMillis();
     }
 
     public void addPlayer(Player player) {
         if (state != GameState.WAITING && state != GameState.STARTING) return;
 
+        plugin.getGameManager().preparePlayerForGame(player);
         players.add(player.getUniqueId());
-        player.teleport(mapData.getSpawn());
+        player.teleport(mapInstance.getSpawnLocation());
         player.setGameMode(GameMode.ADVENTURE);
         bossBar.addPlayer(player);
 
-        broadcast("§a" + player.getName() + " §ea rejoint la partie §7(" + players.size() + "/" + mapData.getMaxPlayers() + ")");
+        MapData template = mapInstance.getTemplate();
+        broadcast("\u00a7a" + player.getName() + " \u00a7ea rejoint la partie \u00a77(" + players.size() + "/" + template.getMaxPlayers() + ")");
 
-        if (players.size() >= mapData.getMaxPlayers()) {
+        if (players.size() >= template.getMaxPlayers()) {
             startGame();
-        } else if (players.size() >= mapData.getMinPlayers() && state == GameState.WAITING) {
+        } else if (players.size() >= template.getMinPlayers() && state == GameState.WAITING) {
             startCountdown();
         }
 
@@ -60,42 +77,52 @@ public class Game {
         spectators.remove(player.getUniqueId());
         bossBar.removePlayer(player);
         removeScoreboard(player);
+        plugin.getGameManager().restorePlayerAfterGame(player);
         player.setGameMode(GameMode.SURVIVAL);
 
-        broadcast("§c" + player.getName() + " §ea quitté la partie §7(" + players.size() + "/" + mapData.getMaxPlayers() + ")");
+        MapData template = mapInstance.getTemplate();
+        broadcast("\u00a7c" + player.getName() + " \u00a7ea quitte la partie \u00a77(" + players.size() + "/" + template.getMaxPlayers() + ")");
 
-        if (state == GameState.STARTING && players.size() < mapData.getMinPlayers()) {
+        if (state == GameState.STARTING && players.size() < template.getMinPlayers()) {
             cancelCountdown();
         }
 
-        if (state == GameState.RUNNING) checkWin();
+        if (state == GameState.RUNNING) {
+            checkWin();
+        }
         updateScoreboards();
+
+        if (isEmpty() && (state == GameState.WAITING || state == GameState.STARTING)) {
+            String instanceId = mapInstance.getTemplateName().toLowerCase() + "_" + mapInstance.getSlotIndex();
+            plugin.getGameManager().freeInstance(instanceId);
+        }
     }
 
     public void eliminatePlayer(Player player) {
         alivePlayers.remove(player.getUniqueId());
         spectators.add(player.getUniqueId());
-        player.teleport(mapData.getSpawn());
+        player.teleport(mapInstance.getSpawnLocation());
         player.setGameMode(GameMode.SPECTATOR);
 
-        broadcast("§c" + player.getName() + " §ea été éliminé ! §7(" + alivePlayers.size() + " restants)");
+        broadcast("\u00a7c" + player.getName() + " \u00a7ea ete elimine ! \u00a77(" + alivePlayers.size() + " restants)");
         updateScoreboards();
         checkWin();
     }
 
     private void startCountdown() {
         state = GameState.STARTING;
-        final int waitTime = mapData.getWaitTime();
+        final int waitTime = mapInstance.getTemplate().getWaitTime();
 
         countdownTask = new BukkitRunnable() {
             int timer = waitTime;
+
             @Override
             public void run() {
                 if (timer <= 0) {
-                    if (players.size() >= mapData.getMinPlayers()) {
+                    if (players.size() >= mapInstance.getTemplate().getMinPlayers()) {
                         startGame();
                     } else {
-                        broadcast("§cPas assez de joueurs ! Partie annulée.");
+                        broadcast("\u00a7cPas assez de joueurs ! Partie annulee.");
                         cancelGame();
                     }
                     cancel();
@@ -103,10 +130,10 @@ public class Game {
                 }
 
                 bossBar.setProgress((double) timer / waitTime);
-                bossBar.setTitle("§eDémarrage dans §c" + timer + "s");
+                bossBar.setTitle("\u00a7eDemarrage dans \u00a7c" + timer + "s");
 
                 if (timer <= 5 || timer == 10 || timer == 15 || timer == 30) {
-                    broadcast("§eLa partie commence dans §c" + timer + " §esecondes !");
+                    broadcast("\u00a7eLa partie commence dans \u00a7c" + timer + " \u00a7esecondes !");
                 }
                 timer--;
             }
@@ -115,42 +142,72 @@ public class Game {
     }
 
     private void cancelCountdown() {
-        if (countdownTask != null) { countdownTask.cancel(); countdownTask = null; }
+        if (countdownTask != null) {
+            countdownTask.cancel();
+            countdownTask = null;
+        }
         state = GameState.WAITING;
-        bossBar.setTitle("§eTNTRun - " + mapData.getName());
+        waitingStartTimeMillis = System.currentTimeMillis();
+        bossBar.setTitle("\u00a7eTNTRun - " + mapInstance.getTemplateName());
         bossBar.setProgress(1.0);
     }
 
     private void startGame() {
-        if (countdownTask != null) { countdownTask.cancel(); countdownTask = null; }
+        if (countdownTask != null) {
+            countdownTask.cancel();
+            countdownTask = null;
+        }
         state = GameState.RUNNING;
+        gracePeriod = true;
+        scheduledBlocks.clear();
+        startTntMonitor();
 
         alivePlayers.addAll(players);
-        bossBar.setTitle("§c§lTNTRun - EN JEU");
+        bossBar.setTitle("\u00a7c\u00a7lTNTRun - EN JEU");
         bossBar.setColor(BarColor.RED);
         bossBar.setProgress(1.0);
 
-        // TP all players to random positions in zone
         for (UUID uuid : players) {
-            Player p = Bukkit.getPlayer(uuid);
-            if (p != null) {
-                p.teleport(getRandomLocation());
-                p.setGameMode(GameMode.SURVIVAL);
+            Player player = Bukkit.getPlayer(uuid);
+            if (player == null) {
+                continue;
             }
+
+            Location tntLoc = getRandomTNTLocation();
+            if (tntLoc != null) {
+                player.teleport(tntLoc);
+            } else {
+                player.teleport(mapInstance.getSpawnLocation());
+            }
+            player.setGameMode(GameMode.ADVENTURE);
         }
 
-        // 3 second countdown before TNT activation
-        broadcast("§e§lPréparez-vous !");
+        broadcast("\u00a7e\u00a7lTeleportation ! Preparez-vous...");
+
         new BukkitRunnable() {
             int countdown = 3;
+
             @Override
             public void run() {
                 if (countdown <= 0) {
-                    broadcast("§c§lC'EST PARTI ! Les blocs vont disparaître !");
+                    gracePeriod = false;
+                    broadcast("\u00a7c\u00a7lC'EST PARTI ! Les blocs vont disparaitre !");
+                    for (UUID uuid : alivePlayers) {
+                        Player player = Bukkit.getPlayer(uuid);
+                        if (player != null) {
+                            player.setGameMode(GameMode.SURVIVAL);
+                        }
+                    }
                     cancel();
                     return;
                 }
-                broadcast("§6" + countdown + "...");
+
+                for (UUID uuid : players) {
+                    Player player = Bukkit.getPlayer(uuid);
+                    if (player != null) {
+                        player.sendTitle("\u00a76\u00a7l" + countdown, "\u00a7eLes blocs vont bientot disparaitre !", 0, 25, 5);
+                    }
+                }
                 countdown--;
             }
         }.runTaskTimer(plugin, 20L, 20L);
@@ -158,22 +215,31 @@ public class Game {
         updateScoreboards();
     }
 
+    public boolean isGracePeriod() {
+        return gracePeriod;
+    }
+
     private void checkWin() {
         if (state != GameState.RUNNING) return;
+
         if (alivePlayers.size() <= 1) {
             state = GameState.ENDING;
             if (alivePlayers.size() == 1) {
                 UUID winnerUUID = alivePlayers.iterator().next();
                 Player winner = Bukkit.getPlayer(winnerUUID);
                 if (winner != null) {
-                    broadcast("§6§l★ §eGG §b" + winner.getName() + " §ea gagné la partie ! §6§l★");
+                    broadcast("\u00a76\u00a7l* \u00a7eGG \u00a7b" + winner.getName() + " \u00a7ea gagne la partie ! \u00a76\u00a7l*");
                     plugin.getConfigManager().addWin(winnerUUID, winner.getName());
                 }
+            } else {
+                broadcast("\u00a77Aucun gagnant cette fois !");
             }
 
             new BukkitRunnable() {
                 @Override
-                public void run() { endGame(); }
+                public void run() {
+                    endGame();
+                }
             }.runTaskLater(plugin, 60L);
         }
     }
@@ -184,67 +250,174 @@ public class Game {
     }
 
     private void endGame() {
+        MapData template = mapInstance.getTemplate();
+        stopTntMonitor();
+        scheduledBlocks.clear();
+
         for (UUID uuid : new HashSet<>(players)) {
-            Player p = Bukkit.getPlayer(uuid);
-            if (p != null) {
-                bossBar.removePlayer(p);
-                removeScoreboard(p);
-                p.setGameMode(GameMode.SURVIVAL);
-                if (mapData.getHubSpawn() != null) {
-                    p.teleport(mapData.getHubSpawn());
-                } else if (mapData.getSpawn() != null) {
-                    p.teleport(mapData.getSpawn());
+            Player player = Bukkit.getPlayer(uuid);
+            if (player != null) {
+                bossBar.removePlayer(player);
+                removeScoreboard(player);
+                plugin.getGameManager().restorePlayerAfterGame(player);
+                player.setGameMode(GameMode.SURVIVAL);
+                if (template.getHubSpawn() != null) {
+                    player.teleport(template.getHubSpawn());
                 }
             }
             plugin.getGameManager().removePlayerMapping(uuid);
         }
+
+        plugin.getGameManager().restoreInstance(mapInstance);
+
         players.clear();
         alivePlayers.clear();
         spectators.clear();
+        gracePeriod = false;
         state = GameState.WAITING;
+        waitingStartTimeMillis = System.currentTimeMillis();
         bossBar.removeAll();
-        bossBar = Bukkit.createBossBar("§eTNTRun - " + mapData.getName(), BarColor.YELLOW, BarStyle.SOLID);
+        bossBar = Bukkit.createBossBar("\u00a7eTNTRun - " + mapInstance.getTemplateName(), BarColor.YELLOW, BarStyle.SOLID);
+
+        String instanceId = mapInstance.getTemplateName().toLowerCase() + "_" + mapInstance.getSlotIndex();
+        plugin.getGameManager().freeInstance(instanceId);
     }
 
-    public void forceStop() { endGame(); }
+    private Location getRandomTNTLocation() {
+        List<int[]> tntPositions = mapInstance.getTemplate().getTntRelativePositions();
+        if (tntPositions == null || tntPositions.isEmpty()) return null;
 
-    private Location getRandomLocation() {
-        Location p1 = mapData.getPos1();
-        Location p2 = mapData.getPos2();
+        List<int[]> shuffled = new ArrayList<>(tntPositions);
+        Collections.shuffle(shuffled);
 
-        double x = ThreadLocalRandom.current().nextDouble(Math.min(p1.getX(), p2.getX()), Math.max(p1.getX(), p2.getX()));
-        double z = ThreadLocalRandom.current().nextDouble(Math.min(p1.getZ(), p2.getZ()), Math.max(p1.getZ(), p2.getZ()));
-        double y = Math.max(p1.getY(), p2.getY());
+        for (int[] pos : shuffled) {
+            int absX = mapInstance.getOriginX() + pos[0];
+            int absY = mapInstance.getOriginY() + pos[1];
+            int absZ = mapInstance.getOriginZ() + pos[2];
 
-        return new Location(p1.getWorld(), x, y, z);
+            Block block = mapInstance.getWorld().getBlockAt(absX, absY, absZ);
+            if (block.getType() != Material.TNT) {
+                continue;
+            }
+
+            Block above = mapInstance.getWorld().getBlockAt(absX, absY + 1, absZ);
+            Block above2 = mapInstance.getWorld().getBlockAt(absX, absY + 2, absZ);
+            if (above.getType() == Material.AIR && above2.getType() == Material.AIR) {
+                return new Location(mapInstance.getWorld(), absX + 0.5, absY + 1, absZ + 0.5);
+            }
+        }
+        return null;
+    }
+
+    public void forceStop() {
+        endGame();
+    }
+
+    private void startTntMonitor() {
+        stopTntMonitor();
+        tntMonitorTask = new BukkitRunnable() {
+            @Override
+            public void run() {
+                if (state != GameState.RUNNING) {
+                    cancel();
+                    return;
+                }
+
+                if (gracePeriod) {
+                    return;
+                }
+
+                for (UUID uuid : new HashSet<>(alivePlayers)) {
+                    Player player = Bukkit.getPlayer(uuid);
+                    if (player == null || !player.isOnline()) {
+                        continue;
+                    }
+
+                    for (Block block : getTouchedTntBlocks(player)) {
+                        scheduleBlockBreak(block);
+                    }
+                }
+            }
+        };
+        tntMonitorTask.runTaskTimer(plugin, 1L, 1L);
+    }
+
+    private void stopTntMonitor() {
+        if (tntMonitorTask != null) {
+            tntMonitorTask.cancel();
+            tntMonitorTask = null;
+        }
+    }
+
+    private Set<Block> getTouchedTntBlocks(Player player) {
+        Set<Block> touchedBlocks = new HashSet<>();
+        Location feet = player.getLocation().clone().subtract(0, 0.15, 0);
+        double[][] offsets = {
+                {0.0, 0.0},
+                {0.29, 0.29},
+                {0.29, -0.29},
+                {-0.29, 0.29},
+                {-0.29, -0.29}
+        };
+
+        for (double[] offset : offsets) {
+            Block block = feet.clone().add(offset[0], 0, offset[1]).getBlock();
+            if (block.getType() == Material.TNT) {
+                touchedBlocks.add(block);
+            }
+        }
+
+        return touchedBlocks;
+    }
+
+    private void scheduleBlockBreak(Block block) {
+        Location blockLocation = block.getLocation();
+        if (!scheduledBlocks.add(blockLocation)) {
+            return;
+        }
+
+        new BukkitRunnable() {
+            @Override
+            public void run() {
+                try {
+                    if (state == GameState.RUNNING && !gracePeriod && block.getType() == Material.TNT) {
+                        block.setType(Material.AIR);
+                    }
+                } finally {
+                    scheduledBlocks.remove(blockLocation);
+                }
+            }
+        }.runTaskLater(plugin, 20L);
     }
 
     private void broadcast(String message) {
         for (UUID uuid : players) {
-            Player p = Bukkit.getPlayer(uuid);
-            if (p != null) p.sendMessage(message);
+            Player player = Bukkit.getPlayer(uuid);
+            if (player != null) {
+                player.sendMessage(message);
+            }
         }
     }
 
-    // ===== Scoreboard =====
-
     private void updateScoreboards() {
         for (UUID uuid : players) {
-            Player p = Bukkit.getPlayer(uuid);
-            if (p != null) setScoreboard(p);
+            Player player = Bukkit.getPlayer(uuid);
+            if (player != null) {
+                setScoreboard(player);
+            }
         }
     }
 
     private void setScoreboard(Player player) {
         Scoreboard board = Bukkit.getScoreboardManager().getNewScoreboard();
-        Objective obj = board.registerNewObjective("tntrun", Criteria.DUMMY, "§6§lTNT Run");
-        obj.setDisplaySlot(DisplaySlot.SIDEBAR);
+        Objective objective = board.registerNewObjective("tntrun", Criteria.DUMMY, "\u00a76\u00a7lTNT Run");
+        objective.setDisplaySlot(DisplaySlot.SIDEBAR);
 
-        obj.getScore("§eMap: §f" + mapData.getName()).setScore(5);
-        obj.getScore("§eJoueurs: §f" + alivePlayers.size() + "/" + players.size()).setScore(4);
-        obj.getScore("§eStatut: §f" + getStateText()).setScore(3);
-        obj.getScore("§7------------------").setScore(2);
-        obj.getScore("§ebettertntrun.com").setScore(1);
+        objective.getScore("\u00a7eMap: \u00a7f" + mapInstance.getTemplateName()).setScore(5);
+        objective.getScore("\u00a7eJoueurs: \u00a7f" + alivePlayers.size() + "/" + players.size()).setScore(4);
+        objective.getScore("\u00a7eStatut: \u00a7f" + getStateText()).setScore(3);
+        objective.getScore("\u00a77------------------").setScore(2);
+        objective.getScore("\u00a7ebettertntrun.com").setScore(1);
 
         player.setScoreboard(board);
         playerScoreboards.put(player.getUniqueId(), board);
@@ -257,19 +430,63 @@ public class Game {
 
     private String getStateText() {
         return switch (state) {
-            case WAITING -> "§aEn attente";
-            case STARTING -> "§eDémarrage...";
-            case RUNNING -> "§cEn jeu";
-            case ENDING -> "§7Terminé";
+            case WAITING -> "\u00a7aEn attente";
+            case STARTING -> "\u00a7eDemarrage...";
+            case RUNNING -> gracePeriod ? "\u00a76Preparation..." : "\u00a7cEn jeu";
+            case ENDING -> "\u00a77Termine";
         };
     }
 
-    // ===== Getters =====
-    public boolean isRunning() { return state == GameState.RUNNING; }
-    public boolean isFull() { return players.size() >= mapData.getMaxPlayers(); }
-    public boolean isEmpty() { return players.isEmpty(); }
-    public boolean isAlive(UUID uuid) { return alivePlayers.contains(uuid); }
-    public boolean isInGame(UUID uuid) { return players.contains(uuid); }
-    public GameState getState() { return state; }
-    public MapData getMapData() { return mapData; }
+    public boolean isRunning() {
+        return state == GameState.RUNNING;
+    }
+
+    public boolean isWaiting() {
+        return state == GameState.WAITING;
+    }
+
+    public boolean isEnding() {
+        return state == GameState.ENDING;
+    }
+
+    public boolean isFull() {
+        return players.size() >= mapInstance.getTemplate().getMaxPlayers();
+    }
+
+    public boolean isEmpty() {
+        return players.isEmpty();
+    }
+
+    public boolean isAlive(UUID uuid) {
+        return alivePlayers.contains(uuid);
+    }
+
+    public boolean isInGame(UUID uuid) {
+        return players.contains(uuid);
+    }
+
+    public GameState getState() {
+        return state;
+    }
+
+    public MapInstance getMapInstance() {
+        return mapInstance;
+    }
+
+    public int getEliminationY() {
+        return mapInstance.getEliminationY();
+    }
+
+    public int getPlayerCount() {
+        return players.size();
+    }
+
+    public long getWaitingTicks() {
+        if (state != GameState.WAITING && state != GameState.STARTING) return 0;
+        return Math.max(0L, (System.currentTimeMillis() - waitingStartTimeMillis) / 50L);
+    }
+
+    public UUID getFirstPlayerUUID() {
+        return players.isEmpty() ? null : players.iterator().next();
+    }
 }

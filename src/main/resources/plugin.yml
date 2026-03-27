@@ -2,17 +2,11 @@ name: BetterTntRun
 version: 1.0.0
 main: com.bettertntrun.BetterTntRun
 api-version: '1.21'
-description: A configurable TNT Run mini-game plugin
-authors: [BetterTntRun]
 commands:
   tntrun:
-    description: Main command for BetterTntRun
-    usage: /tntrun <subcommand>
-    permission: bettertntrun.use
+    description: Commandes du TNT Run
+    usage: /tntrun help
 permissions:
-  bettertntrun.use:
-    description: Allows using basic tntrun commands
-    default: true
   bettertntrun.admin:
-    description: Allows admin tntrun commands
+    description: Permission admin TNTRun
     default: op
